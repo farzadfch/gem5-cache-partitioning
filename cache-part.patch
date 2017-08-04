@@ -1,0 +1,443 @@
+diff -r b2118d8d72b8 src/arch/arm/isa/formats/aarch64.isa
+--- a/src/arch/arm/isa/formats/aarch64.isa	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/arch/arm/isa/formats/aarch64.isa	Thu Aug 03 21:39:18 2017 -0500
+@@ -2008,6 +2008,7 @@
+           case 0x54: return new M5panic(machInst);
+           case 0x5a: return new M5workbegin64(machInst);
+           case 0x5b: return new M5workend64(machInst);
++          case 0x59: return new M5enablewaypart(machInst);
+           default: return new Unknown64(machInst);
+         }
+     }
+diff -r b2118d8d72b8 src/arch/arm/isa/formats/m5ops.isa
+--- a/src/arch/arm/isa/formats/m5ops.isa	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/arch/arm/isa/formats/m5ops.isa	Thu Aug 03 21:39:18 2017 -0500
+@@ -68,6 +68,7 @@
+             case 0x54: return new M5panic(machInst);
+             case 0x5a: return new M5workbegin(machInst);
+             case 0x5b: return new M5workend(machInst);
++            case 0x59: return new M5enablewaypart(machInst);
+         }
+    }
+    '''
+diff -r b2118d8d72b8 src/arch/arm/isa/insts/m5ops.isa
+--- a/src/arch/arm/isa/insts/m5ops.isa	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/arch/arm/isa/insts/m5ops.isa	Thu Aug 03 21:39:18 2017 -0500
+@@ -563,4 +563,28 @@
+     header_output += BasicDeclare.subst(m5workendIop)
+     decoder_output += BasicConstructor.subst(m5workendIop)
+     exec_output += PredOpExecute.subst(m5workendIop)
++    
++    m5enablewaypart_code = '''
++        PseudoInst::enablewaypart(xc->tcBase(), join32to64(R1, R0));
++    '''
++
++    m5enablewaypart_code64 = '''
++        PseudoInst::enablewaypart(xc->tcBase(), X0);
++    '''
++
++    m5enablewaypartIop = InstObjParams("m5enablewaypart", "M5enablewaypart", "PredOp",
++                                   { "code":  m5enablewaypart_code,
++                                     "predicate_test": predicateTest },
++                                     ["IsNonSpeculative", "IsUnverifiable"])
++    header_output += BasicDeclare.subst(m5enablewaypartIop)
++    decoder_output += BasicConstructor.subst(m5enablewaypartIop)
++    exec_output += PredOpExecute.subst(m5enablewaypartIop)
++
++    m5enablewaypartIop = InstObjParams("m5enablewaypart", "M5enablewaypart64", "PredOp",
++                                   { "code":  m5enablewaypart_code64,
++                                     "predicate_test": predicateTest },
++                                     ["IsNonSpeculative", "IsUnverifiable"])
++    header_output += BasicDeclare.subst(m5enablewaypartIop)
++    decoder_output += BasicConstructor.subst(m5enablewaypartIop)
++    exec_output += PredOpExecute.subst(m5enablewaypartIop)
+ }};
+diff -r b2118d8d72b8 src/mem/cache/SConscript
+--- a/src/mem/cache/SConscript	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/SConscript	Thu Aug 03 21:39:18 2017 -0500
+@@ -43,3 +43,4 @@
+ DebugFlag('CacheRepl')
+ DebugFlag('CacheTags')
+ DebugFlag('HWPrefetch')
++DebugFlag('WayPart')
+diff -r b2118d8d72b8 src/mem/cache/blk.hh
+--- a/src/mem/cache/blk.hh	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/blk.hh	Thu Aug 03 21:39:18 2017 -0500
+@@ -117,6 +117,8 @@
+      * @todo Move this into subclasses when we fix CacheTags to use them.
+      */
+     int set;
++    
++    int way;
+ 
+     /** whether this block has been touched */
+     bool isTouched;
+diff -r b2118d8d72b8 src/mem/cache/cache.hh
+--- a/src/mem/cache/cache.hh	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/cache.hh	Thu Aug 03 21:39:18 2017 -0500
+@@ -220,7 +220,7 @@
+      * list.  Return free block frame.  May return NULL if there are
+      * no replaceable blocks at the moment.
+      */
+-    BlkType *allocateBlock(Addr addr, bool is_secure, PacketList &writebacks);
++    BlkType *allocateBlock(Addr addr, bool is_secure, PacketList &writebacks, int id, MasterID masterId);
+ 
+     /**
+      * Populates a cache block and handles all outstanding requests for the
+@@ -303,7 +303,7 @@
+      * @param blk The block to writeback.
+      * @return The writeback request for the block.
+      */
+-    PacketPtr writebackBlk(BlkType *blk);
++    PacketPtr writebackBlk(BlkType *blk, MasterID masterId);
+ 
+ 
+     void memWriteback();
+diff -r b2118d8d72b8 src/mem/cache/cache_impl.hh
+--- a/src/mem/cache/cache_impl.hh	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/cache_impl.hh	Thu Aug 03 21:39:18 2017 -0500
+@@ -59,11 +59,13 @@
+ #include "debug/Cache.hh"
+ #include "debug/CachePort.hh"
+ #include "debug/CacheTags.hh"
++#include "debug/WayPart.hh"
+ #include "mem/cache/prefetch/base.hh"
+ #include "mem/cache/blk.hh"
+ #include "mem/cache/cache.hh"
+ #include "mem/cache/mshr.hh"
+ #include "sim/sim_exit.hh"
++#include <string>
+ 
+ template<class TagStore>
+ Cache<TagStore>::Cache(const Params *p)
+@@ -321,7 +323,7 @@
+         assert(blkSize == pkt->getSize());
+         if (blk == NULL) {
+             // need to do a replacement
+-            blk = allocateBlock(pkt->getAddr(), pkt->isSecure(), writebacks);
++            blk = allocateBlock(pkt->getAddr(), pkt->isSecure(), writebacks, id, pkt->req->masterId());
+             if (blk == NULL) {
+                 // no replaceable block available, give up.
+                 // Writeback will be forwarded to next level,
+@@ -1259,7 +1261,7 @@
+     // if we used temp block, clear it out
+     if (blk == tempBlock) {
+         if (blk->isDirty()) {
+-            allocateWriteBuffer(writebackBlk(blk), time, true);
++            allocateWriteBuffer(writebackBlk(blk, pkt->req->masterId()), time, true);
+         }
+         blk->invalidate();
+     }
+@@ -1274,7 +1276,7 @@
+ 
+ template<class TagStore>
+ PacketPtr
+-Cache<TagStore>::writebackBlk(BlkType *blk)
++Cache<TagStore>::writebackBlk(BlkType *blk, MasterID masterId)
+ {
+     assert(blk && blk->isValid() && blk->isDirty());
+ 
+@@ -1282,7 +1284,7 @@
+ 
+     Request *writebackReq =
+         new Request(tags->regenerateBlkAddr(blk->tag, blk->set), blkSize, 0,
+-                Request::wbMasterId);
++                /* Request::wbMasterId */ masterId);
+     if (blk->isSecure())
+         writebackReq->setFlags(Request::SECURE);
+ 
+@@ -1388,10 +1390,39 @@
+ template<class TagStore>
+ typename Cache<TagStore>::BlkType*
+ Cache<TagStore>::allocateBlock(Addr addr, bool is_secure,
+-                               PacketList &writebacks)
++                               PacketList &writebacks, int id, MasterID masterId)
+ {
++    using namespace std;
++
++    string masterName = system->getMasterName(masterId);
++    string cpu0("cpu0"), cpus0("cpus0"), cpu1("cpu1"), cpus1("cpus1"), cpu2("cpu2"), cpus2("cpus2"), cpu3("cpu3"), cpus3("cpus3");
++
++    if (!isTopLevel) {
++        if (system->isWayPartEnable()) {
++            if (masterName.find(cpu0) != string::npos || masterName.find(cpus0) != string::npos)
++                tags->setWayAllocation(0, 3);
++            else if (masterName.find(cpu1) != string::npos || masterName.find(cpus1) != string::npos)
++                tags->setWayAllocation(4, 7);
++            else if (masterName.find(cpu2) != string::npos || masterName.find(cpus2) != string::npos)
++                tags->setWayAllocation(8, 11);
++            else if (masterName.find(cpu3) != string::npos || masterName.find(cpus3) != string::npos)
++                tags->setWayAllocation(12, 15);
++            else {
++                panic("CPU ID not found");
++            }
++        } else {
++            tags->setWayAllocation(0, 15);
++        }
++    }
++
+     BlkType *blk = tags->findVictim(addr);
+ 
++    if (isTopLevel == false)
++    {
++      string masterName = system->getMasterName(masterId);
++      DPRINTF(WayPart, "CPU ID: %d Master:%d %s Way No: %d \n", id, masterId, masterName.c_str(), blk->way);
++    }
++
+     if (blk->isValid()) {
+         Addr repl_addr = tags->regenerateBlkAddr(blk->tag, blk->set);
+         MSHR *repl_mshr = mshrQueue.findMatch(repl_addr, blk->isSecure());
+@@ -1412,7 +1443,7 @@
+ 
+             if (blk->isDirty()) {
+                 // Save writeback packet for handling by caller
+-                writebacks.push_back(writebackBlk(blk));
++                writebacks.push_back(writebackBlk(blk, masterId));
+             }
+         }
+     }
+@@ -1441,7 +1472,8 @@
+         // better have read new data...
+         assert(pkt->hasData());
+         // need to do a replacement
+-        blk = allocateBlock(addr, is_secure, writebacks);
++        int id = pkt->req->hasContextId() ? pkt->req->contextId() : -1;
++        blk = allocateBlock(addr, is_secure, writebacks, id, pkt->req->masterId());
+         if (blk == NULL) {
+             // No replaceable block... just use temporary storage to
+             // complete the current request and then get rid of it
+diff -r b2118d8d72b8 src/mem/cache/tags/base.hh
+--- a/src/mem/cache/tags/base.hh	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/tags/base.hh	Thu Aug 03 21:39:18 2017 -0500
+@@ -169,6 +169,15 @@
+      * Computes stats just prior to dump event
+      */
+     virtual void computeStats() {}
++    
++    /**
++     * Limit the allocation for the cache ways.
++     * @param ways The ways available for replacement.
++     */
++    virtual void setWayAllocation(int lowerNum, int upperNum)
++    {
++        panic("This tag class does not implement way allocation limit!\n");
++    }
+ 
+     /**
+      *iterated through all blocks and clear all locks
+diff -r b2118d8d72b8 src/mem/cache/tags/base_set_assoc.cc
+--- a/src/mem/cache/tags/base_set_assoc.cc	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/tags/base_set_assoc.cc	Thu Aug 03 21:39:18 2017 -0500
+@@ -55,6 +55,8 @@
+ 
+ BaseSetAssoc::BaseSetAssoc(const Params *p)
+     :BaseTags(p), assoc(p->assoc),
++     lowerWayNum(0),
++     upperWayNum(p->assoc - 1),
+      numSets(p->size / (p->block_size * p->assoc)),
+      sequentialAccess(p->sequential_access)
+ {
+@@ -111,6 +113,7 @@
+             blk->size = blkSize;
+             sets[i].blks[j]=blk;
+             blk->set = i;
++            blk->way = j;
+         }
+     }
+ }
+diff -r b2118d8d72b8 src/mem/cache/tags/base_set_assoc.hh
+--- a/src/mem/cache/tags/base_set_assoc.hh	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/tags/base_set_assoc.hh	Thu Aug 03 21:39:18 2017 -0500
+@@ -87,6 +87,8 @@
+   protected:
+     /** The associativity of the cache. */
+     const unsigned assoc;
++    /** Ways available for allocation */
++    unsigned lowerWayNum, upperWayNum;
+     /** The number of sets in the cache. */
+     const unsigned numSets;
+     /** Whether tags and data are accessed sequentially. */
+@@ -227,7 +229,7 @@
+         int set = extractSet(addr);
+ 
+         // prefer to evict an invalid block
+-        for (int i = 0; i < assoc; ++i) {
++        for (int i = lowerWayNum; i <= upperWayNum; ++i) {
+             blk = sets[set].blks[i];
+             if (!blk->isValid()) {
+                 break;
+@@ -290,6 +292,20 @@
+          tagAccesses += 1;
+          dataAccesses += 1;
+      }
++     
++     
++    /**
++     * Limit the allocation for the cache ways.
++     * @param ways The ways available for replacement.
++     */
++    virtual void setWayAllocation(int lowerNum, int upperNum) override
++    {
++        fatal_if(lowerNum < 0, "Lower allocation limit must be greater than or equal to zero");
++        fatal_if(upperNum < 0, "Upper allocation limit must be greater than or equal to zero");
++        fatal_if(upperNum >= assoc, "Upper allocation limit must be less that the number of ways");
++        lowerWayNum = lowerNum;
++        upperWayNum = upperNum;
++    }
+ 
+     /**
+      * Generate the tag from the given address.
+diff -r b2118d8d72b8 src/mem/cache/tags/fa_lru.cc
+--- a/src/mem/cache/tags/fa_lru.cc	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/tags/fa_lru.cc	Thu Aug 03 21:39:18 2017 -0500
+@@ -103,6 +103,7 @@
+         blks[i].prev = &(blks[i-1]);
+         blks[i].next = &(blks[i+1]);
+         blks[i].isTouched = false;
++        blks[i].way = i;
+     }
+     assert(j == numCaches);
+     assert(index == numBlocks);
+diff -r b2118d8d72b8 src/mem/cache/tags/lru.cc
+--- a/src/mem/cache/tags/lru.cc	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/mem/cache/tags/lru.cc	Thu Aug 03 21:39:18 2017 -0500
+@@ -75,9 +75,17 @@
+ {
+     int set = extractSet(addr);
+     // grab a replacement candidate
+-    BlkType *blk = sets[set].blks[assoc - 1];
++    BlkType *blk = NULL;
++    for (int i = assoc - 1; i >= 0; i--) {
++        BlkType *b = sets[set].blks[i];
++        if (b->way >= lowerWayNum && b->way <= upperWayNum) {
++            blk = b;
++            break;
++        }
++    }
++    // assert(!blk || blk->way < allocAssoc);
+ 
+-    if (blk->isValid()) {
++    if (blk && blk->isValid()) {
+         DPRINTF(CacheRepl, "set %x: selecting blk %x for replacement\n",
+                 set, regenerateBlkAddr(blk->tag, set));
+     }
+diff -r b2118d8d72b8 src/sim/pseudo_inst.cc
+--- a/src/sim/pseudo_inst.cc	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/sim/pseudo_inst.cc	Thu Aug 03 21:39:18 2017 -0500
+@@ -706,4 +706,10 @@
+     }
+ }
+ 
++void enablewaypart(ThreadContext *tc, int use)
++{
++    System *sys = tc->getSystemPtr();
++    sys->enableWayPart(use);
++}
++
+ } // namespace PseudoInst
+diff -r b2118d8d72b8 src/sim/pseudo_inst.hh
+--- a/src/sim/pseudo_inst.hh	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/sim/pseudo_inst.hh	Thu Aug 03 21:39:18 2017 -0500
+@@ -72,8 +72,8 @@
+ uint64_t readfile(ThreadContext *tc, Addr vaddr, uint64_t len,
+     uint64_t offset);
+ uint64_t writefile(ThreadContext *tc, Addr vaddr, uint64_t len,
+-    uint64_t offset, Addr filenameAddr);
+-void loadsymbol(ThreadContext *xc);
++    uint64_t offset, Addr filenameAddr);void enablewaypart(ThreadContext *tc, int use);
++void loadsymbol(ThreadContext *xc);void enablewaypart(ThreadContext *tc, int use);
+ void addsymbol(ThreadContext *tc, Addr addr, Addr symbolAddr);
+ uint64_t initParam(ThreadContext *xc);
+ uint64_t rpns(ThreadContext *tc);
+@@ -88,6 +88,7 @@
+ void switchcpu(ThreadContext *tc);
+ void workbegin(ThreadContext *tc, uint64_t workid, uint64_t threadid);
+ void workend(ThreadContext *tc, uint64_t workid, uint64_t threadid);
++void enablewaypart(ThreadContext *tc, int use);
+ 
+ } // namespace PseudoInst
+ 
+diff -r b2118d8d72b8 src/sim/system.cc
+--- a/src/sim/system.cc	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/sim/system.cc	Thu Aug 03 21:39:18 2017 -0500
+@@ -86,6 +86,7 @@
+       physmem(name() + ".physmem", p->memories),
+       memoryMode(p->mem_mode),
+       _cacheLineSize(p->cache_line_size),
++      wayPartEnabled(false),
+       workItemsBegin(0),
+       workItemsEnd(0),
+       numWorkIds(p->num_work_ids),
+@@ -190,6 +191,16 @@
+     memoryMode = mode;
+ }
+ 
++void
++System::enableWayPart(int use) {
++    wayPartEnabled = use;
++}
++
++bool
++System::isWayPartEnable() {
++    return wayPartEnabled;
++}
++
+ bool System::breakpoint()
+ {
+     if (remoteGDB.size())
+diff -r b2118d8d72b8 src/sim/system.hh
+--- a/src/sim/system.hh	Thu Aug 03 19:21:59 2017 -0500
++++ b/src/sim/system.hh	Thu Aug 03 21:39:18 2017 -0500
+@@ -203,6 +203,9 @@
+     /** Return number of running (non-halted) thread contexts in
+      * system.  These threads could be Active or Suspended. */
+     int numRunningContexts();
++    
++    void enableWayPart(int use);
++    bool isWayPartEnable();
+ 
+     Addr pagePtr;
+ 
+@@ -276,6 +279,7 @@
+     Enums::MemoryMode memoryMode;
+ 
+     const unsigned int _cacheLineSize;
++    bool wayPartEnabled;
+ 
+     uint64_t workItemsBegin;
+     uint64_t workItemsEnd;
+diff -r b2118d8d72b8 util/m5/m5op.h
+--- a/util/m5/m5op.h	Thu Aug 03 19:21:59 2017 -0500
++++ b/util/m5/m5op.h	Thu Aug 03 21:39:18 2017 -0500
+@@ -61,6 +61,7 @@
+ void m5_panic(void);
+ void m5_work_begin(uint64_t workid, uint64_t threadid);
+ void m5_work_end(uint64_t workid, uint64_t threadid);
++void m5_enablewaypart(int use);
+ 
+ // These operations are for critical path annotation
+ void m5a_bsm(char *sm, const void *id, int flags);
+diff -r b2118d8d72b8 util/m5/m5op_arm.S
+--- a/util/m5/m5op_arm.S	Thu Aug 03 19:21:59 2017 -0500
++++ b/util/m5/m5op_arm.S	Thu Aug 03 21:39:18 2017 -0500
+@@ -89,6 +89,7 @@
+ SIMPLE_OP(m5_panic, panic_func, 0)
+ SIMPLE_OP(m5_work_begin, work_begin_func, 0)
+ SIMPLE_OP(m5_work_end, work_end_func, 0)
++SIMPLE_OP(m5_enablewaypart, enablewaypart_func, 0)
+ 
+ SIMPLE_OP(m5a_bsm, annotate_func, an_bsm)
+ SIMPLE_OP(m5a_esm, annotate_func, an_esm)
+diff -r b2118d8d72b8 util/m5/m5ops.h
+--- a/util/m5/m5ops.h	Thu Aug 03 19:21:59 2017 -0500
++++ b/util/m5/m5ops.h	Thu Aug 03 21:39:18 2017 -0500
+@@ -57,7 +57,8 @@
+ #define reserved2_func          0x56 // Reserved for user
+ #define reserved3_func          0x57 // Reserved for user
+ #define reserved4_func          0x58 // Reserved for user
+-#define reserved5_func          0x59 // Reserved for user
++#define enablewaypart_func      0x59 // Reserved for user
++//#define reserved5_func          0x59 // Reserved for user
+ 
+ #define work_begin_func          0x5a
+ #define work_end_func            0x5b
