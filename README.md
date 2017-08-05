@@ -7,12 +7,11 @@ This patch adds L2 cache partitioning feature to gem5. Cache partitioning assign
 
 int main()
 {
-	 // enable cache partitioning
-	 m5_enablewaypart(1);
+     // enable cache partitioning
+     m5_enablewaypart(1);
 }
 ```
 
 Passing zero to this function disables cache partitioning.
 
-
-### Limitations
+The patch can be directly applied to revision 10422 of gem5 (a relatively old version of gem5). I believe it is still not too much of a hurdle if someone wants to manually apply the modification to a later version of gem5. The ways assigned to each core are hard coded in file *src/mem/cache/cache_impl.hh* in function **allocateBlock**. In order to find who is requesting to allocate a line in L2, the code looks for the CPU name in the *MasterName*. I agree that it is a little bit dirty to find the requester CPU in this way. I am open to ideas to improve this section.
