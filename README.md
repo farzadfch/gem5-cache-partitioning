@@ -24,4 +24,4 @@ Farzad Farshchi, Prathap Kumar Valsan, Renato Mancuso, and Heechul Yun, **"Deter
 | [arXiv](https://arxiv.org/abs/1707.05260)
 | [Presentation slides](http://www.ittc.ku.edu/~farshchi/papers/detmem-ecrts18-slides.pdf)
 
-The repository for the paper above is accessible [here](https://github.com/CSL-KU/detmem). If you prefer not to patch gem5, the paper's repository can be useful as it contains the modified gem5 source.
+The repository for the paper above is accessible [here](https://github.com/CSL-KU/detmem). If you prefer not to patch gem5, the paper's repository can be useful as it contains the entire modified gem5 source.
